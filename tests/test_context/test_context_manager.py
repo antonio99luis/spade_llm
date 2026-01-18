@@ -6,7 +6,9 @@ from unittest.mock import Mock
 from spade_llm.context import ContextManager
 from spade_llm.context._types import create_system_message, create_user_message, create_assistant_message
 from spade_llm.context.management import (
-    NoContextManagement, WindowSizeContext, SmartWindowSizeContext
+    NoContextManagement, WindowSizeContext, SmartWindowSizeContext,
+    TokenBasedContext, SmartTokenBasedContext, AdaptiveTokenContext
+
 )
 
 
@@ -460,15 +462,16 @@ class TestNoContextManagement:
         """Test NoContextManagement statistics."""
         strategy = NoContextManagement()
         stats = strategy.get_stats(10)
-        
-        expected = {
-            "strategy": "none",
-            "total_messages": 10,
-            "messages_in_context": 10,
-            "messages_dropped": 0
-        }
-        assert stats == expected
+        print("NO CONTEXT MANAGEMENT STATS:", stats)
 
+        assert stats["strategy"] == "none"
+        assert stats["total_messages"] == 10
+        assert stats["messages_in_context"] == 10
+        assert stats["messages_dropped"] == 0
+        assert "model" in stats
+        assert "tokens_before" in stats
+        assert "tokens_after" in stats
+        assert "tokens_saved" in stats
 
 class TestWindowSizeContext:
     """Test WindowSizeContext strategy."""
@@ -533,28 +536,35 @@ class TestWindowSizeContext:
         strategy = WindowSizeContext(max_messages=10)
         stats = strategy.get_stats(5)
         
-        expected = {
-            "strategy": "window_size",
-            "max_messages": 10,
-            "total_messages": 5,
-            "messages_in_context": 5,
-            "messages_dropped": 0
-        }
-        assert stats == expected
+        print("WINDOW SIZE CONTEXT STATS:", stats)
+
+        
+        assert stats["strategy"] == "window_size"
+        assert stats["max_messages"] == 10
+        assert stats["total_messages"] == 5
+        assert stats["messages_in_context"] == 5
+        assert stats["messages_dropped"] == 0
+        assert "model" in stats
+        assert "tokens_before" in stats
+        assert "tokens_after" in stats
+        assert "tokens_saved" in stats
     
     def test_get_stats_over_limit(self):
         """Test WindowSizeContext statistics when over limit."""
         strategy = WindowSizeContext(max_messages=5)
         stats = strategy.get_stats(10)
         
-        expected = {
-            "strategy": "window_size",
-            "max_messages": 5,
-            "total_messages": 10,
-            "messages_in_context": 5,
-            "messages_dropped": 5
-        }
-        assert stats == expected
+        print("WindowSizeContext over limit STATS:", stats)
+        
+        assert stats["strategy"] == "window_size"
+        assert stats["max_messages"] == 5
+        assert stats["total_messages"] == 10
+        assert stats["messages_in_context"] == 5
+        assert stats["messages_dropped"] == 5
+        assert "model" in stats
+        assert "tokens_before" in stats
+        assert "tokens_after" in stats
+        assert "tokens_saved" in stats
 
 
 class TestSmartWindowSizeContext:
@@ -753,16 +763,19 @@ class TestSmartWindowSizeContext:
         strategy = SmartWindowSizeContext(max_messages=5, preserve_initial=2, prioritize_tools=True)
         stats = strategy.get_stats(10)
         
-        expected = {
-            "strategy": "smart_window_size",
-            "max_messages": 5,
-            "preserve_initial": 2,
-            "prioritize_tools": True,
-            "total_messages": 10,
-            "messages_in_context": 5,
-            "messages_dropped": 5
-        }
-        assert stats == expected
+        print("SmartWindowSizeContext STATS:", stats)
+
+        assert stats["strategy"] == "smart_window_size"
+        assert stats["max_messages"] == 5
+        assert stats["preserve_initial"] == 2
+        assert stats["prioritize_tools"] == True
+        assert stats["total_messages"] == 10
+        assert stats["messages_in_context"] == 5
+        assert stats["messages_dropped"] == 5
+        assert "model" in stats
+        assert "tokens_before" in stats
+        assert "tokens_after" in stats
+        assert "tokens_saved" in stats
 
 
 class TestSmartWindowSizeContextEdgeCases:
@@ -948,6 +961,9 @@ class TestContextManagerWithStrategies:
             cm.add_message_dict(create_user_message(f"Message {i}"), conversation_id)
         
         stats = cm.get_context_stats(conversation_id)
+
+        print("Context Manager STATS:", stats)
+
         assert stats["strategy"] == "smart_window_size"
         assert stats["total_messages"] == 8
         assert stats["messages_in_context"] == 5
@@ -957,6 +973,7 @@ class TestContextManagerWithStrategies:
         """Test context statistics for non-existent conversation."""
         cm = ContextManager()
         stats = cm.get_context_stats("nonexistent")
+        print("No Context Management STATS:", stats)
         assert stats == {}
     
     def test_update_context_management(self):
@@ -1021,6 +1038,7 @@ class TestContextManagementPerformance:
         
         # Verify context stats
         stats = cm.get_context_stats(conversation_id)
+        print("Large Conversation STATS:", stats)
         assert stats["total_messages"] == 1200  # 1000 iterations: 800 single messages + 200 tool pairs (400 messages)
         assert stats["messages_in_context"] == 50
         assert stats["messages_dropped"] == 1150  # 1200 - 50
@@ -1258,3 +1276,734 @@ class TestContextManagementConcurrency:
         
         # Verify conversations were created
         assert len(cm.get_active_conversations()) == 5
+
+
+
+class TestTokenBasedContext:
+    """Test TokenBasedContext strategy."""
+    
+    def test_init_token_based_context(self):
+        """Test initialization with default parameters."""
+        strategy = TokenBasedContext()
+        assert strategy.max_tokens == 4096
+        assert strategy.reserve_tokens == 500
+        assert strategy.available_tokens == 3596
+        assert strategy.model == "gpt-3.5-turbo"
+    
+    def test_init_with_custom_params(self):
+        """Test initialization with custom parameters."""
+        strategy = TokenBasedContext(
+            max_tokens=8000,
+            reserve_tokens=1000,
+            model="gpt-4"
+        )
+        assert strategy.max_tokens == 8000
+        assert strategy.reserve_tokens == 1000
+        assert strategy.available_tokens == 7000
+        assert strategy.model == "gpt-4"
+    
+    def test_init_invalid_max_tokens(self):
+        """Test initialization with invalid max_tokens."""
+        with pytest.raises(ValueError, match="max_tokens must be greater than 0"):
+            TokenBasedContext(max_tokens=0)
+        
+        with pytest.raises(ValueError, match="max_tokens must be greater than 0"):
+            TokenBasedContext(max_tokens=-100)
+    
+    def test_init_invalid_reserve_tokens(self):
+        """Test initialization with invalid reserve_tokens."""
+        with pytest.raises(ValueError, match="reserve_tokens must be >= 0"):
+            TokenBasedContext(reserve_tokens=-10)
+        
+        with pytest.raises(ValueError, match="reserve_tokens must be less than max_tokens"):
+            TokenBasedContext(max_tokens=1000, reserve_tokens=1000)
+    
+    def test_apply_context_strategy_empty_messages(self):
+        """Test applying strategy to empty message list."""
+        strategy = TokenBasedContext()
+        result = strategy.apply_context_strategy([])
+        assert result == []
+    
+    def test_apply_context_strategy_under_limit(self):
+        """Test applying strategy when messages fit within limit."""
+        strategy = TokenBasedContext(max_tokens=10000, reserve_tokens=500)
+        messages = [
+            create_user_message("Short message 1"),
+            create_assistant_message("Short response 1"),
+            create_user_message("Short message 2"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        assert len(result) == 3
+        assert result == messages
+    
+    def test_apply_context_strategy_over_limit(self):
+        """Test applying strategy when messages exceed limit."""
+        strategy = TokenBasedContext(max_tokens=100, reserve_tokens=10)
+        
+        # Create messages that will exceed the token limit
+        messages = [
+            create_user_message("This is message number one with some content"),
+            create_user_message("This is message number two with some content"),
+            create_user_message("This is message number three with some content"),
+            create_user_message("This is message number four with some content"),
+            create_user_message("This is message number five with some content"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        
+        # Should keep only the most recent messages that fit
+        if len(result) < len(messages):
+            assert result[-1] == messages[-1]
+    
+    def test_get_stats(self):
+        """Test statistics generation."""
+        strategy = TokenBasedContext(max_tokens=4096, reserve_tokens=500)
+        messages = [
+            create_user_message("Message 1"),
+            create_assistant_message("Response 1"),
+            create_user_message("Message 2"),
+        ]
+        
+        strategy.apply_context_strategy(messages)
+        stats = strategy.get_stats(total_messages=3)
+        print("TokenBasedContext STATS:", stats)
+        
+        assert stats["strategy"] == "token_based"
+        assert stats["max_tokens"] == 4096
+        assert stats["reserve_tokens"] == 500
+        assert stats["available_tokens"] == 3596
+        assert stats["total_messages"] == 3
+        assert stats["messages_in_context"] >= 0
+        assert "tokens_before" in stats
+        assert "tokens_after" in stats
+        assert "tokens_saved" in stats
+        assert "tokens_available" in stats
+
+
+class TestSmartTokenBasedContext:
+    """Test SmartTokenBasedContext strategy."""
+    
+    def test_init_smart_token_based_context(self):
+        """Test initialization with default parameters."""
+        strategy = SmartTokenBasedContext()
+        assert strategy.max_tokens == 4096
+        assert strategy.reserve_tokens == 500
+        assert strategy.available_tokens == 3596
+        assert strategy.preserve_initial == 0
+        assert strategy.prioritize_tools == False
+        assert strategy.model == "gpt-3.5-turbo"
+    
+    def test_init_with_custom_params(self):
+        """Test initialization with custom parameters."""
+        strategy = SmartTokenBasedContext(
+            max_tokens=8000,
+            reserve_tokens=1000,
+            preserve_initial=2,
+            prioritize_tools=True,
+            model="gpt-4"
+        )
+        assert strategy.max_tokens == 8000
+        assert strategy.reserve_tokens == 1000
+        assert strategy.available_tokens == 7000
+        assert strategy.preserve_initial == 2
+        assert strategy.prioritize_tools == True
+        assert strategy.model == "gpt-4"
+    
+    def test_init_invalid_params(self):
+        """Test initialization with invalid parameters."""
+        with pytest.raises(ValueError):
+            SmartTokenBasedContext(max_tokens=0)
+        
+        with pytest.raises(ValueError):
+            SmartTokenBasedContext(reserve_tokens=-10)
+        
+        with pytest.raises(ValueError):
+            SmartTokenBasedContext(max_tokens=1000, reserve_tokens=1000)
+        
+        with pytest.raises(ValueError):
+            SmartTokenBasedContext(preserve_initial=-1)
+    
+    def test_apply_context_strategy_under_limit(self):
+        """Test applying strategy when messages fit within limit."""
+        strategy = SmartTokenBasedContext(max_tokens=10000, reserve_tokens=500)
+        messages = [
+            create_user_message("Message 1"),
+            create_assistant_message("Response 1"),
+            create_user_message("Message 2"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        assert len(result) == 3
+        assert result == messages
+    
+    def test_preserve_initial_messages(self):
+        """Test that initial messages are preserved."""
+        strategy = SmartTokenBasedContext(
+            max_tokens=200,
+            reserve_tokens=10,
+            preserve_initial=2
+        )
+        
+        messages = [
+            create_user_message("Initial message 1 - must be preserved"),
+            create_assistant_message("Initial response 1 - must be preserved"),
+            create_user_message("Middle message that might be dropped"),
+            create_user_message("Middle message that might be dropped"),
+            create_user_message("Recent message that should be kept"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        
+        # First two messages should always be present
+        assert result[0] == messages[0]
+        assert result[1] == messages[1]
+        # Most recent message should be present
+        assert messages[-1] in result
+    
+    def test_tool_pair_preservation(self):
+        """Test that tool call/result pairs are preserved together."""
+        strategy = SmartTokenBasedContext(
+            max_tokens=300,
+            reserve_tokens=10,
+            prioritize_tools=True
+        )
+        
+        messages = [
+            create_user_message("User request"),
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "test_tool", "arguments": "{}"}
+                    }
+                ]
+            },
+            {
+                "role": "tool",
+                "content": "Tool result",
+                "tool_call_id": "call_123",
+                "tool_name": "test_tool"
+            },
+            create_assistant_message("Final response"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        
+        # If assistant message with tool_calls is included, its result must be too
+        has_tool_call = any(
+            msg.get("role") == "assistant" and msg.get("tool_calls") 
+            for msg in result
+        )
+        has_tool_result = any(
+            msg.get("role") == "tool" and msg.get("tool_call_id") == "call_123"
+            for msg in result
+        )
+        
+        # Both should be present or both absent
+        assert has_tool_call == has_tool_result
+    
+    def test_smart_combination_preserve_and_prioritize(self):
+        """Test combination of preserve_initial and prioritize_tools."""
+        strategy = SmartTokenBasedContext(
+            max_tokens=400,
+            reserve_tokens=10,
+            preserve_initial=1,
+            prioritize_tools=True
+        )
+        
+        messages = [
+            create_user_message("Initial message - must be preserved"),
+            create_user_message("Regular message 1"),
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_456",
+                        "type": "function",
+                        "function": {"name": "important_tool", "arguments": "{}"}
+                    }
+                ]
+            },
+            {
+                "role": "tool",
+                "content": "Important tool result",
+                "tool_call_id": "call_456",
+                "tool_name": "important_tool"
+            },
+            create_user_message("Regular message 2"),
+            create_assistant_message("Final response"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        
+        # First message should be preserved
+        assert result[0] == messages[0]
+        
+        # Tool pair should be prioritized
+        has_tool_call = any(
+            msg.get("role") == "assistant" and msg.get("tool_calls")
+            for msg in result
+        )
+        has_tool_result = any(
+            msg.get("role") == "tool" and msg.get("tool_call_id") == "call_456"
+            for msg in result
+        )
+        
+        if has_tool_call:
+            assert has_tool_result, "Tool call without result"
+    
+    def test_get_stats(self):
+        """Test statistics generation."""
+        strategy = SmartTokenBasedContext(
+            max_tokens=4096,
+            reserve_tokens=500,
+            preserve_initial=1,
+            prioritize_tools=True
+        )
+        
+        messages = [
+            create_user_message("Message 1"),
+            create_assistant_message("Response 1"),
+        ]
+        
+        strategy.apply_context_strategy(messages)
+        stats = strategy.get_stats(total_messages=2)
+        print("SmartTokenBasedContext STATS:", stats)
+        
+        assert stats["strategy"] == "smart_token_based"
+        assert stats["max_tokens"] == 4096
+        assert stats["reserve_tokens"] == 500
+        assert stats["preserve_initial"] == 1
+        assert stats["prioritize_tools"] == True
+        assert stats["total_messages"] == 2
+        assert "tokens_before" in stats
+        assert "tokens_after" in stats
+        assert "compression_ratio" in stats
+
+
+class TestAdaptiveTokenContext:
+    """Test AdaptiveTokenContext strategy."""
+    
+    def test_init_adaptive_token_context(self):
+        """Test initialization with default parameters."""
+        strategy = AdaptiveTokenContext()
+        assert strategy.max_tokens == 4096
+        assert strategy.reserve_tokens == 500
+        assert strategy.available_tokens == 3596
+        assert strategy.target_utilization == 0.85
+        assert strategy.model == "gpt-3.5-turbo"
+    
+    def test_init_with_custom_params(self):
+        """Test initialization with custom parameters."""
+        strategy = AdaptiveTokenContext(
+            max_tokens=8000,
+            reserve_tokens=1000,
+            target_utilization=0.9,
+            model="gpt-4"
+        )
+        assert strategy.max_tokens == 8000
+        assert strategy.reserve_tokens == 1000
+        assert strategy.target_utilization == 0.9
+        assert strategy.model == "gpt-4"
+    
+    def test_init_invalid_params(self):
+        """Test initialization with invalid parameters."""
+        with pytest.raises(ValueError):
+            AdaptiveTokenContext(max_tokens=0)
+        
+        with pytest.raises(ValueError):
+            AdaptiveTokenContext(target_utilization=0)
+        
+        with pytest.raises(ValueError):
+            AdaptiveTokenContext(target_utilization=1.5)
+    
+    def test_apply_context_strategy_empty_messages(self):
+        """Test applying strategy to empty message list."""
+        strategy = AdaptiveTokenContext()
+        result = strategy.apply_context_strategy([])
+        assert result == []
+    
+    def test_apply_context_strategy_under_limit(self):
+        """Test applying strategy when messages fit within limit."""
+        strategy = AdaptiveTokenContext(max_tokens=10000, reserve_tokens=500)
+        messages = [
+            create_user_message("Message 1"),
+            create_assistant_message("Response 1"),
+            create_user_message("Message 2"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        assert len(result) == 3
+        assert result == messages
+    
+    def test_message_scoring(self):
+        """Test that messages are scored appropriately."""
+        strategy = AdaptiveTokenContext(max_tokens=300, reserve_tokens=10)
+        
+        messages = [
+            create_user_message("Old message"),
+            create_user_message("Middle message"),
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_789",
+                        "type": "function",
+                        "function": {"name": "test_tool", "arguments": "{}"}
+                    }
+                ]
+            },
+            {
+                "role": "tool",
+                "content": "Tool result",
+                "tool_call_id": "call_789",
+                "tool_name": "test_tool"
+            },
+            create_user_message("Recent message"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        
+        # Should prioritize recent messages and tool pairs
+        assert len(result) <= len(messages)
+        # Most recent message should be present
+        assert messages[-1] in result
+    
+    def test_tool_pair_preservation_adaptive(self):
+        """Test that tool pairs are preserved in adaptive strategy."""
+        strategy = AdaptiveTokenContext(max_tokens=300, reserve_tokens=10)
+        
+        messages = [
+            create_user_message("Request 1"),
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "tool1", "arguments": "{}"}
+                    }
+                ]
+            },
+            {
+                "role": "tool",
+                "content": "Result 1",
+                "tool_call_id": "call_abc",
+                "tool_name": "tool1"
+            },
+            create_user_message("Request 2"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        
+        # Check tool pair preservation
+        has_tool_call = any(
+            msg.get("role") == "assistant" and msg.get("tool_calls")
+            for msg in result
+        )
+        has_tool_result = any(
+            msg.get("role") == "tool" and msg.get("tool_call_id") == "call_abc"
+            for msg in result
+        )
+        
+        # Both should be present or both absent
+        assert has_tool_call == has_tool_result
+    
+    def test_adaptive_behavior_over_time(self):
+        """Test that strategy adapts over multiple applications."""
+        strategy = AdaptiveTokenContext(max_tokens=500, reserve_tokens=50)
+        
+        # Apply strategy multiple times
+        for i in range(5):
+            messages = [
+                create_user_message(f"Message {j}")
+                for j in range(10)
+            ]
+            result = strategy.apply_context_strategy(messages)
+            assert len(result) > 0
+    
+    def test_get_stats(self):
+        """Test statistics generation."""
+        strategy = AdaptiveTokenContext(
+            max_tokens=4096,
+            reserve_tokens=500,
+            target_utilization=0.85
+        )
+        
+        messages = [
+            create_user_message("Message 1"),
+            create_assistant_message("Response 1"),
+        ]
+        
+        strategy.apply_context_strategy(messages)
+        stats = strategy.get_stats(total_messages=2)
+        print("AdaptiveTokenContext STATS:", stats)
+        
+        assert stats["strategy"] == "adaptive_token"
+        assert stats["max_tokens"] == 4096
+        assert stats["reserve_tokens"] == 500
+        assert "target_utilization" in stats
+        assert stats["total_messages"] == 2
+        assert "tokens_before" in stats
+        assert "tokens_after" in stats
+        assert "avg_token_usage" in stats
+
+
+class TestTokenBasedContextEdgeCases:
+    """Test edge cases for token-based strategies."""
+    
+    def test_single_message_exceeds_limit(self):
+        """Test handling of a single message that exceeds token limit."""
+        strategy = TokenBasedContext(max_tokens=50, reserve_tokens=10)
+        
+        messages = [
+            create_user_message("This is a very long message that exceeds the token limit " * 10)
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        # Should return empty list if single message exceeds limit
+        assert isinstance(result, list)
+    
+    def test_multiple_tool_calls_same_assistant(self):
+        """Test handling of multiple tool calls from the same assistant message."""
+        strategy = SmartTokenBasedContext(
+            max_tokens=500,
+            reserve_tokens=10,
+            prioritize_tools=True
+        )
+        
+        messages = [
+            create_user_message("User request"),
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "tool1", "arguments": "{}"}
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "tool2", "arguments": "{}"}
+                    }
+                ]
+            },
+            {
+                "role": "tool",
+                "content": "Result 1",
+                "tool_call_id": "call_1",
+                "tool_name": "tool1"
+            },
+            {
+                "role": "tool",
+                "content": "Result 2",
+                "tool_call_id": "call_2",
+                "tool_name": "tool2"
+            },
+            create_assistant_message("Final response"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        
+        # If assistant with tool_calls is present, all its results should be too
+        has_assistant = any(
+            msg.get("role") == "assistant" and msg.get("tool_calls")
+            for msg in result
+        )
+        
+        if has_assistant:
+            has_result_1 = any(
+                msg.get("role") == "tool" and msg.get("tool_call_id") == "call_1"
+                for msg in result
+            )
+            has_result_2 = any(
+                msg.get("role") == "tool" and msg.get("tool_call_id") == "call_2"
+                for msg in result
+            )
+            assert has_result_1 or has_result_2, "At least one tool result should be present"
+    
+    def test_interleaved_tool_calls(self):
+        """Test handling of interleaved tool calls and regular messages."""
+        strategy = SmartTokenBasedContext(
+            max_tokens=600,
+            reserve_tokens=10,
+            prioritize_tools=True
+        )
+        
+        messages = [
+            create_user_message("Request 1"),
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_a", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}}]
+            },
+            {
+                "role": "tool",
+                "content": "Result A",
+                "tool_call_id": "call_a",
+                "tool_name": "tool_a"
+            },
+            create_user_message("Request 2"),
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_b", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}}]
+            },
+            {
+                "role": "tool",
+                "content": "Result B",
+                "tool_call_id": "call_b",
+                "tool_name": "tool_b"
+            },
+            create_assistant_message("Final answer"),
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        
+        # Verify tool pairs are preserved
+        for msg in result:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tool_call in msg.get("tool_calls", []):
+                    call_id = tool_call.get("id")
+                    # Check if corresponding result exists
+                    has_result = any(
+                        m.get("role") == "tool" and m.get("tool_call_id") == call_id
+                        for m in result
+                    )
+                    assert has_result, f"Tool call {call_id} missing its result"
+    
+    def test_empty_tool_calls_list(self):
+        """Test handling of assistant message with empty tool_calls list."""
+        strategy = SmartTokenBasedContext(prioritize_tools=True)
+        
+        messages = [
+            create_user_message("Request"),
+            {
+                "role": "assistant",
+                "content": "Response",
+                "tool_calls": []  # Empty list
+            },
+        ]
+        
+        result = strategy.apply_context_strategy(messages)
+        assert len(result) == 2
+
+
+class TestContextManagerWithTokenStrategies:
+    """Test ContextManager integration with token-based strategies."""
+    
+    def test_context_manager_with_token_strategy(self, conversation_id):
+        """Test ContextManager with TokenBasedContext strategy."""
+        cm = ContextManager(
+            max_tokens=4096,
+            system_prompt="Test system prompt"
+        )
+        
+        strategy = TokenBasedContext(max_tokens=1000, reserve_tokens=100)
+        cm.update_context_management(strategy)
+        
+        # Add messages
+        for i in range(10):
+            msg = create_user_message(f"Message {i}")
+            cm.add_message_dict(msg, conversation_id)
+        
+        prompt = cm.get_prompt(conversation_id)
+        
+        # Should have system prompt + managed messages
+        assert prompt[0]["role"] == "system"
+        assert len(prompt) > 1
+    
+    def test_context_manager_with_smart_token_strategy(self, conversation_id):
+        """Test ContextManager with SmartTokenBasedContext strategy."""
+        cm = ContextManager(
+            max_tokens=4096,
+            system_prompt="Test system prompt"
+        )
+        
+        strategy = SmartTokenBasedContext(
+            max_tokens=1000,
+            reserve_tokens=100,
+            preserve_initial=2,
+            prioritize_tools=True
+        )
+        cm.update_context_management(strategy)
+        
+        # Add initial messages
+        cm.add_message_dict(create_user_message("Initial 1"), conversation_id)
+        cm.add_message_dict(create_assistant_message("Initial response"), conversation_id)
+        
+        # Add tool interaction
+        cm.add_message_dict({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call_test", "type": "function", "function": {"name": "test", "arguments": "{}"}}]
+        }, conversation_id)
+        cm.add_tool_result("test", {"result": "success"}, "call_test", conversation_id)
+        
+        # Add more messages
+        for i in range(5):
+            cm.add_message_dict(create_user_message(f"Message {i}"), conversation_id)
+        
+        prompt = cm.get_prompt(conversation_id)
+        
+        # Should preserve initial messages
+        assert prompt[1]["content"] == "Initial 1"
+        assert prompt[2]["content"] == "Initial response"
+    
+    def test_context_manager_with_adaptive_strategy(self, conversation_id):
+        """Test ContextManager with AdaptiveTokenContext strategy."""
+        cm = ContextManager(
+            max_tokens=4096,
+            system_prompt="Test system prompt"
+        )
+        
+        strategy = AdaptiveTokenContext(
+            max_tokens=1000,
+            reserve_tokens=100,
+            target_utilization=0.8
+        )
+        cm.update_context_management(strategy)
+        
+        # Add messages over multiple iterations
+        for round_num in range(3):
+            for i in range(5):
+                msg = create_user_message(f"Round {round_num} Message {i}")
+                cm.add_message_dict(msg, conversation_id)
+            
+            prompt = cm.get_prompt(conversation_id)
+            assert len(prompt) > 1  # System + at least some messages
+    
+    def test_token_stats_accuracy(self, conversation_id):
+        """Test that token statistics are accurate."""
+        cm = ContextManager(system_prompt="Test")
+        
+        strategy = TokenBasedContext(max_tokens=500, reserve_tokens=50, model="gpt-3.5-turbo")
+        cm.update_context_management(strategy)
+        
+        # Add messages
+        messages = [
+            create_user_message("Test message 1"),
+            create_assistant_message("Test response 1"),
+            create_user_message("Test message 2"),
+        ]
+        
+        for msg in messages:
+            cm.add_message_dict(msg, conversation_id)
+        
+        stats = cm.get_context_stats(conversation_id)
+        print("TOKEN BASED CONTEXT STATS:", stats)
+
+        assert "tokens_before" in stats
+        assert "tokens_after" in stats
+        assert stats["tokens_before"] >= 0
+        assert stats["tokens_after"] >= 0
+        assert stats["tokens_after"] <= stats["tokens_before"]

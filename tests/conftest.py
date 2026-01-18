@@ -8,8 +8,7 @@ from typing import Dict, Any, List, Optional
 from spade.message import Message
 from spade_llm.context import ContextManager
 from spade_llm.tools import LLMTool
-from spade_llm.providers.base_provider import LLMProvider
-
+from spade_llm.providers.base_provider import BaseLLMProvider as LLMProvider
 
 # Configure pytest for async testing
 pytest_plugins = ("pytest_asyncio",)
