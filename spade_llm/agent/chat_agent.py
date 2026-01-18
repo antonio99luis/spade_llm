@@ -31,6 +31,7 @@ class ChatAgent(Agent):
                 target_jid = self.get("target_agent_jid")
                 msg = Message(to=target_jid)
                 msg.body = message_to_send
+                msg.thread = self.get("conversation_id")
                 msg.set_metadata("performative", "request")
                 msg.set_metadata("message_type", "llm")  # Mark as LLM-targeted message
 
@@ -117,6 +118,7 @@ class ChatAgent(Agent):
         # Store configuration in agent's data
         self.set("target_agent_jid", self.target_agent_jid)
         self.set("message_to_send", None)
+        self.set("conversation_id", f"{self.jid}_{self.target_agent_jid}_init")
         self.set("display_callback", self.display_callback)
         self.set("on_message_sent", self.on_message_sent)
         self.set("on_message_received", self.on_message_received)
@@ -129,6 +131,15 @@ class ChatAgent(Agent):
         self.add_behaviour(send_behaviour)
         self.add_behaviour(receive_behaviour)
 
+    def set_conversation_id(self, conversation_id: str):
+        """
+        Set the conversation ID for this chat session.
+
+        Args:
+            conversation_id: The conversation ID to set
+        """
+        self.set("conversation_id", conversation_id)
+        
     def send_message(self, message: str):
         """
         Queue a message to be sent to the target agent.
