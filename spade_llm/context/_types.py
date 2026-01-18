@@ -6,7 +6,7 @@ for consistent message handling throughout the library.
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, TypedDict, Union
+from typing import Any, Dict, List, Optional, Protocol, TypedDict, Union
 
 from spade.message import Message
 
@@ -152,3 +152,29 @@ def create_assistant_tool_call_message(
 def create_tool_result_message(result: Any, tool_call_id: str) -> ToolResultMessage:
     """Format a tool result as a ToolResultMessage."""
     return {"role": "tool", "content": str(result), "tool_call_id": tool_call_id}
+
+
+class SummarizerProtocol(Protocol):
+    """Protocol for objects that can summarize text.
+    
+    This protocol defines the interface for summarization without creating
+    a circular dependency with LLMProvider.
+    """
+    
+    async def summarize(
+        self,
+        text: str,
+        prompt: str = "Summarize the following text concisely:",
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Generate a summary of the provided text.
+        
+        Args:
+            text: The text to summarize
+            prompt: Instructions for the summarization
+            metadata: Optional metadata for tracing
+            
+        Returns:
+            The summarized text as a string
+        """
+        ...

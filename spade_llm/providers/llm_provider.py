@@ -13,7 +13,7 @@ logger = logging.getLogger("spade_llm.providers")
 
 try:
     import opentelemetry
-    litellm.callbacks = ["langfuse_otel"]
+    backs = ["langfuse_otel"]
     logger.info("LiteLLM tracing enabled with langfuse_otel callback")
 except ImportError:
     logger.debug("OpenTelemetry not available, LiteLLM tracing disabled")
@@ -114,7 +114,7 @@ class LLMProvider(BaseLLMProvider):
             - 'text': The text response (None if there are tool calls)
             - 'tool_calls': List of tool calls (empty if there are none)
         """
-        prompt = context.get_prompt(conversation_id)
+        prompt = await context.get_prompt(conversation_id)
         logger.info(f"Sending prompt to {self.model}")
         logger.debug(f"Prompt: {prompt}")
 
@@ -253,4 +253,68 @@ class LLMProvider(BaseLLMProvider):
 
         except Exception as e:
             logger.error(f"Embedding error: {e}", exc_info=True)
+            raise
+
+    async def summarize(
+        self,
+        text: str,
+        prompt: str = "Summarize the following text concisely:",
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Generate a summary of the provided text using the LLM.
+
+        Args:
+            text: The text to summarize
+            prompt: Instructions for the summarization (system prompt)
+            metadata: Optional metadata for tracing (session_id, tags, etc.)
+
+        Returns:
+            The summarized text as a string
+
+        Raises:
+            Exception: If the API call fails
+        """
+        logger.info(f"Generating summary using {self.model}")
+        logger.debug(f"Text to summarize (first 200 chars): {text[:200]}...")
+
+        try:
+            # Build messages for summarization
+            messages = [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text}
+            ]
+
+            # Build completion kwargs
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": self.temperature,
+                "timeout": self.timeout,
+                "num_retries": self.num_retries,
+                **self.kwargs,
+            }
+
+            if self.api_key:
+                kwargs["api_key"] = self.api_key
+            
+            if self.base_url:
+                kwargs["api_base"] = self.base_url
+
+            if self.max_tokens:
+                kwargs["max_tokens"] = self.max_tokens
+
+            # Add metadata if provided
+            if metadata:
+                kwargs["metadata"] = metadata
+
+            # Call LiteLLM async completion
+            response = await litellm.acompletion(**kwargs)
+            summary = response.choices[0].message.content or ""
+
+            logger.info(f"Generated summary: {summary[:100]}...")
+            return summary
+
+        except Exception as e:
+            logger.error(f"Summarization error: {e}", exc_info=True)
             raise

@@ -1,9 +1,13 @@
 """Context management for LLM conversations."""
 
+import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from spade.message import Message
+
+if TYPE_CHECKING:
+    from ..providers.base_provider import BaseLLMProvider
 
 from ._types import (
     ContextMessage,
@@ -28,12 +32,17 @@ class ContextManager:
     - Handles persistent storage between behaviour activations
     - Supports conversation-specific contexts
     """
+    
+    # Cache for validated models to avoid repeated litellm checks
+    _validated_models: Set[str] = set()
 
     def __init__(
         self,
         max_tokens: int = 4096,
         system_prompt: Optional[str] = None,
         context_management: Optional[ContextManagement] = None,
+        model: Optional[str] = None,
+        provider: Optional["BaseLLMProvider"] = None,
     ):
         """
         Initialize the context manager.
@@ -42,10 +51,16 @@ class ContextManager:
             max_tokens: Maximum number of tokens to maintain in context
             system_prompt: Optional system instructions for the LLM
             context_management: Optional context management strategy
+            model: Optional model name (if not provided, will be extracted from provider)
+            provider: Optional LLM provider to extract model from automatically
         """
         self.max_tokens = max_tokens
         self._system_prompt = system_prompt
         self._values = {}
+        self.provider = provider
+
+        # Resolve model with priority: manual > provider > fallback
+        self.model = self._resolve_model(model, provider)
 
         # Store messages by conversation ID
         self._conversations: Dict[str, List[ContextMessage]] = {}
@@ -56,9 +71,99 @@ class ContextManager:
         # Current conversation ID (used when not explicitly specified)
         self._current_conversation_id: Optional[str] = None
 
-        # Context management strategy
-        self.context_management = context_management or NoContextManagement()
-
+        # Context management strategy - pass model if not already set
+        if context_management:
+            if hasattr(context_management, 'model') and not context_management.model:
+                context_management.model = self.model
+            self.context_management = context_management
+        else:
+            self.context_management = NoContextManagement(model=self.model)
+    
+    def _resolve_model(
+        self, 
+        model: Optional[str], 
+        provider: Optional["BaseLLMProvider"]
+    ) -> str:
+        """
+        Resolve the model to use for token counting.
+        
+        Priority:
+        1. Explicitly provided model parameter
+        2. Model from provider (if valid for litellm)
+        3. Fallback to 'gpt-3.5-turbo'
+        
+        Args:
+            model: Explicitly provided model name
+            provider: LLM provider instance
+            
+        Returns:
+            Model name to use for token counting
+        """
+        # Priority 1: Explicit model
+        if model:
+            validated_model = self._validate_model_for_token_counting(model)
+            if validated_model:
+                return validated_model
+            logger.warning(
+                f"⚠ Explicitly provided model '{model}' not supported by litellm "
+                f"for token counting. Using fallback 'gpt-3.5-turbo'."
+            )
+            return "gpt-3.5-turbo"
+        
+        # Priority 2: Model from provider
+        if provider and hasattr(provider, 'model'):
+            provider_model = provider.model
+            validated_model = self._validate_model_for_token_counting(provider_model)
+            if validated_model:
+                logger.info(
+                    f"✓ Using model '{provider_model}' from provider for token counting"
+                )
+                return validated_model
+            logger.warning(
+                f"⚠ Provider model '{provider_model}' not supported by litellm "
+                f"for token counting. Using fallback 'gpt-3.5-turbo'."
+            )
+            return "gpt-3.5-turbo"
+        
+        # Priority 3: Fallback
+        logger.info("Using default model 'gpt-3.5-turbo' for token counting")
+        return "gpt-3.5-turbo"
+    
+    def _validate_model_for_token_counting(self, model: str) -> Optional[str]:
+        """
+        Validate if a model is supported by litellm for token counting.
+        
+        Uses a class-level cache to avoid repeated validation of the same model.
+        
+        Args:
+            model: Model name to validate
+            
+        Returns:
+            The model name if valid, None otherwise
+        """
+        if not model:
+            return None
+        
+        # Check cache first
+        if model in self._validated_models:
+            return model
+        
+        try:
+            import litellm
+            # Test token counting with a minimal message
+            test_messages = [{"role": "user", "content": "test"}]
+            litellm.token_counter(model=model, messages=test_messages)
+            
+            # If successful, cache the result
+            self._validated_models.add(model)
+            logger.debug(f"✓ Model '{model}' validated for litellm token counting")
+            return model
+        except Exception as e:
+            logger.debug(
+                f"Model '{model}' validation failed for litellm token counting: {e}"
+            )
+            return None
+    
     def add_message_dict(
         self, message_dict: ContextMessage, conversation_id: str
     ) -> None:
@@ -116,7 +221,7 @@ class ContextManager:
 
         # TODO : Token counting and context windowing will be implemented later
 
-    def get_prompt(self, conversation_id: Optional[str] = None) -> List[ContextMessage]:
+    async def get_prompt(self, conversation_id: Optional[str] = None) -> List[ContextMessage]:
         """
         Get the current prompt including history formatted for LLM providers.
 
@@ -145,10 +250,16 @@ class ContextManager:
         # Get conversation messages
         conversation_messages = self._conversations[conv_id]
 
-        # Apply context management strategy
-        managed_messages = self.context_management.apply_context_strategy(
-            conversation_messages, self._system_prompt
-        )
+        # Apply context management strategy (may be async)
+        apply_strategy = self.context_management.apply_context_strategy
+        if asyncio.iscoroutinefunction(apply_strategy):
+            managed_messages = await apply_strategy(
+                conversation_messages, self._system_prompt
+            )
+        else:
+            managed_messages = apply_strategy(
+                conversation_messages, self._system_prompt
+            )
 
         # Clean and add messages to prompt
         for msg in managed_messages:

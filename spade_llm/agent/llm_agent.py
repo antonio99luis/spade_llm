@@ -88,7 +88,9 @@ class LLMAgent(Agent):
             self.context = kwargs.pop('_context_override')
         else:
             self.context = ContextManager(
-                system_prompt=system_prompt, context_management=context_management
+                system_prompt=system_prompt,
+                context_management=context_management,
+                provider=provider
             )
         self.provider = provider
         self.context_management = context_management
